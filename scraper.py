@@ -3,7 +3,7 @@
 Duales Studium München – täglicher Job-Scraper + Gemini-Analyse → Telegram
 
 Quellen:
-  - Bundesagentur für Arbeit (offizielle API, keine Bot-Blocks)
+  - Bundesagentur für Arbeit (offizielle API, kein Auth nötig)
   - LinkedIn (öffentliche Job-Suche)
 """
 
@@ -33,11 +33,10 @@ SEEN_IDS_FILE = "seen_jobs.json"
 
 # ── Hilfsfunktionen ──────────────────────────────────────────────────────────
 def load_seen_ids() -> set:
-    """Lädt bereits bekannte Job-IDs (Deduplizierung über Tage)."""
     if os.path.exists(SEEN_IDS_FILE):
         with open(SEEN_IDS_FILE) as f:
             data = json.load(f)
-            cutoff = str(date.today())[:7]  # YYYY-MM – letzten Monat behalten
+            cutoff = str(date.today())[:7]
             return set(
                 jid for jid, seen_date in data.items()
                 if seen_date[:7] >= cutoff
@@ -61,33 +60,19 @@ def make_id(title: str, company: str) -> str:
     return hashlib.md5(f"{title}|{company}".lower().encode()).hexdigest()[:12]
 
 
-# ── Scraper: Bundesagentur für Arbeit (offizielle API) ───────────────────────
+# ── Scraper: Bundesagentur für Arbeit ────────────────────────────────────────
 def scrape_bundesagentur() -> list[dict]:
     """
-    Nutzt die öffentliche REST-API der BA.
-    Kein API-Key nötig, keine Bot-Blocks.
+    Öffentliche BA-API – kein OAuth, kein API-Key nötig.
+    Einfach X-API-Key: jobboerse-jobsuche als Header.
     """
     jobs = []
     try:
-        # Anonymen OAuth-Token holen
-        token_r = requests.get(
-            "https://rest.arbeitsagentur.de/oauth/gettoken_cc",
-            params={
-                "client_id": "c003a37f-024f-462a-b36d-b001be4cd24a",
-                "client_secret": "32a39620-32b3-4307-9aa1-511e3d7f48a8",
-                "grant_type": "client_credentials",
-            },
-            timeout=15,
-        )
-        token_r.raise_for_status()
-        token = token_r.json()["access_token"]
-
-        # Stellensuche: "duales Studium" in München, letzte 7 Tage
-        search_r = requests.get(
+        r = requests.get(
             "https://rest.arbeitsagentur.de/jobboerse/jobsuche-service/pc/v4/jobs",
             headers={
                 "User-Agent": HEADERS["User-Agent"],
-                "OAuthAccessToken": token,
+                "X-API-Key": "jobboerse-jobsuche",
             },
             params={
                 "was": "duales Studium",
@@ -99,8 +84,8 @@ def scrape_bundesagentur() -> list[dict]:
             },
             timeout=20,
         )
-        search_r.raise_for_status()
-        data = search_r.json()
+        r.raise_for_status()
+        data = r.json()
 
         for item in data.get("stellenangebote") or []:
             title = item.get("titel", "–")
@@ -160,7 +145,7 @@ def scrape_linkedin() -> list[dict]:
     return jobs
 
 
-# ── Gemini-Analyse (mit Retry bei 429) ───────────────────────────────────────
+# ── Gemini-Analyse ───────────────────────────────────────────────────────────
 def analyze_with_gemini(jobs: list[dict]) -> str:
     if not jobs:
         return "Heute wurden keine neuen Stellen gefunden."
@@ -180,43 +165,45 @@ STELLEN:
 {jobs_text}
 
 Erstelle eine strukturierte Zusammenfassung auf Deutsch mit:
-1. **Überblick** – Wie viele Stellen aus welchen Branchen?
-2. **Top-Empfehlungen** – Die 3 interessantesten Stellen mit kurzer Begründung und direktem Link
-3. **Trends** – Welche Unternehmen/Branchen suchen besonders aktiv?
-4. **Hinweise** – Besonderheiten oder Auffälligkeiten
+1. Überblick – Wie viele Stellen aus welchen Branchen?
+2. Top-Empfehlungen – Die 3 interessantesten Stellen mit kurzer Begründung und direktem Link
+3. Trends – Welche Unternehmen/Branchen suchen besonders aktiv?
+4. Hinweise – Besonderheiten oder Auffälligkeiten
 
-Halte es kompakt und lesbar für Telegram (kein HTML, nur plain text mit Emojis)."""
+Halte es kompakt und lesbar für Telegram (kein Markdown, nur plain text mit Emojis)."""
 
     url = (
-        f"https://generativelanguage.googleapis.com/v1beta/models/"
-        f"gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        f"gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
     )
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"maxOutputTokens": 1500},
     }
 
-    # Retry bei 429: 3 Versuche mit exponentiellem Backoff
-    for attempt in range(3):
+    # Retry bei 429 mit exponentiellem Backoff
+    for attempt in range(4):
         try:
             r = requests.post(
-                url, headers={"Content-Type": "application/json"},
-                json=payload, timeout=60,
+                url,
+                headers={"Content-Type": "application/json"},
+                json=payload,
+                timeout=60,
             )
             if r.status_code == 429:
-                wait = 30 * (attempt + 1)  # 30s, 60s, 90s
-                print(f"[Gemini] Rate limit – warte {wait}s (Versuch {attempt+1}/3)...")
+                wait = 20 * (2 ** attempt)  # 20s, 40s, 80s, 160s
+                print(f"[Gemini] Rate limit – warte {wait}s (Versuch {attempt+1}/4)...")
                 time.sleep(wait)
                 continue
             r.raise_for_status()
             return r.json()["candidates"][0]["content"]["parts"][0]["text"]
         except requests.exceptions.HTTPError as e:
-            if attempt == 2:
+            if attempt == 3:
                 raise
-            print(f"[Gemini] Fehler: {e} – Versuch {attempt+1}/3")
-            time.sleep(30)
+            print(f"[Gemini] HTTP-Fehler: {e} – Versuch {attempt+1}/4")
+            time.sleep(20)
 
-    return "Fehler bei der Gemini-Analyse nach 3 Versuchen."
+    return "Fehler bei der Gemini-Analyse nach 4 Versuchen."
 
 
 # ── Telegram-Versand ─────────────────────────────────────────────────────────
@@ -231,7 +218,6 @@ def send_telegram(message: str):
             json={
                 "chat_id": TELEGRAM_CHAT_ID,
                 "text": chunk,
-                "parse_mode": "Markdown",
             },
             timeout=15,
         )
