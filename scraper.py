@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """
 Duales Studium München – täglicher Job-Scraper + Gemini-Analyse → Telegram
+
+Quellen:
+  - Bundesagentur für Arbeit (offizielle API, keine Bot-Blocks)
+  - LinkedIn (öffentliche Job-Suche)
 """
 
 import os
@@ -24,7 +28,7 @@ HEADERS = {
     )
 }
 
-SEEN_IDS_FILE = "seen_jobs.json"  # wird im GitHub Actions Workspace gespeichert
+SEEN_IDS_FILE = "seen_jobs.json"
 
 
 # ── Hilfsfunktionen ──────────────────────────────────────────────────────────
@@ -33,17 +37,15 @@ def load_seen_ids() -> set:
     if os.path.exists(SEEN_IDS_FILE):
         with open(SEEN_IDS_FILE) as f:
             data = json.load(f)
-            # Nur die letzten 7 Tage behalten
-            cutoff = str(date.today())
+            cutoff = str(date.today())[:7]  # YYYY-MM – letzten Monat behalten
             return set(
                 jid for jid, seen_date in data.items()
-                if seen_date >= cutoff[:8]  # YYYY-MM
+                if seen_date[:7] >= cutoff
             )
     return set()
 
 
 def save_seen_ids(seen: set, new_ids: list):
-    """Speichert Job-IDs mit heutigem Datum."""
     existing = {}
     if os.path.exists(SEEN_IDS_FILE):
         with open(SEEN_IDS_FILE) as f:
@@ -59,115 +61,66 @@ def make_id(title: str, company: str) -> str:
     return hashlib.md5(f"{title}|{company}".lower().encode()).hexdigest()[:12]
 
 
-# ── Scraper: Indeed ──────────────────────────────────────────────────────────
-def scrape_indeed() -> list[dict]:
+# ── Scraper: Bundesagentur für Arbeit (offizielle API) ───────────────────────
+def scrape_bundesagentur() -> list[dict]:
+    """
+    Nutzt die öffentliche REST-API der BA.
+    Kein API-Key nötig, keine Bot-Blocks.
+    """
     jobs = []
-    url = (
-        "https://de.indeed.com/jobs"
-        "?q=duales+Studium&l=M%C3%BCnchen&sort=date&fromage=1"
-    )
     try:
-        r = requests.get(url, headers=HEADERS, timeout=15)
-        soup = BeautifulSoup(r.text, "html.parser")
-        cards = soup.select("div.job_seen_beacon")[:15]
-        for card in cards:
-            title_el = card.select_one("h2.jobTitle span[title]")
-            company_el = card.select_one("span.companyName")
-            location_el = card.select_one("div.companyLocation")
-            snippet_el = card.select_one("div.job-snippet")
-            link_el = card.select_one("a[href]")
+        # Anonymen OAuth-Token holen
+        token_r = requests.get(
+            "https://rest.arbeitsagentur.de/oauth/gettoken_cc",
+            params={
+                "client_id": "c003a37f-024f-462a-b36d-b001be4cd24a",
+                "client_secret": "32a39620-32b3-4307-9aa1-511e3d7f48a8",
+                "grant_type": "client_credentials",
+            },
+            timeout=15,
+        )
+        token_r.raise_for_status()
+        token = token_r.json()["access_token"]
 
-            title = title_el["title"] if title_el else "–"
-            company = company_el.get_text(strip=True) if company_el else "–"
-            location = location_el.get_text(strip=True) if location_el else "München"
-            snippet = snippet_el.get_text(" ", strip=True) if snippet_el else ""
-            link = "https://de.indeed.com" + link_el["href"] if link_el else ""
+        # Stellensuche: "duales Studium" in München, letzte 7 Tage
+        search_r = requests.get(
+            "https://rest.arbeitsagentur.de/jobboerse/jobsuche-service/pc/v4/jobs",
+            headers={
+                "User-Agent": HEADERS["User-Agent"],
+                "OAuthAccessToken": token,
+            },
+            params={
+                "was": "duales Studium",
+                "wo": "München",
+                "umkreis": 25,
+                "veroeffentlichtseit": 7,
+                "size": 25,
+                "page": 1,
+            },
+            timeout=20,
+        )
+        search_r.raise_for_status()
+        data = search_r.json()
+
+        for item in data.get("stellenangebote") or []:
+            title = item.get("titel", "–")
+            company = item.get("arbeitgeber", "–")
+            location = item.get("arbeitsort", {}).get("ort", "München")
+            ref_nr = item.get("refnr", "")
+            link = f"https://www.arbeitsagentur.de/jobsuche/jobdetail/{ref_nr}" if ref_nr else ""
 
             jobs.append({
                 "id": make_id(title, company),
                 "title": title,
                 "company": company,
                 "location": location,
-                "snippet": snippet[:300],
+                "snippet": item.get("kurzbeschreibung", "")[:300],
                 "link": link,
-                "source": "Indeed",
+                "source": "Bundesagentur für Arbeit",
             })
+
     except Exception as e:
-        print(f"[Indeed] Fehler: {e}")
-    return jobs
-
-
-# ── Scraper: Stepstone ───────────────────────────────────────────────────────
-def scrape_stepstone() -> list[dict]:
-    jobs = []
-    url = (
-        "https://www.stepstone.de/jobs/duales-studium/in-muenchen"
-        "?ag=age_1&sort=2"
-    )
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=15)
-        soup = BeautifulSoup(r.text, "html.parser")
-        cards = soup.select("article[data-at='job-item']")[:15]
-        for card in cards:
-            title_el = card.select_one("h2[data-at='job-item-title']")
-            company_el = card.select_one("span[data-at='job-item-company-name']")
-            location_el = card.select_one("span[data-at='job-item-location']")
-            link_el = card.select_one("a[href]")
-
-            title = title_el.get_text(strip=True) if title_el else "–"
-            company = company_el.get_text(strip=True) if company_el else "–"
-            location = location_el.get_text(strip=True) if location_el else "München"
-            link = link_el["href"] if link_el else ""
-            if link and not link.startswith("http"):
-                link = "https://www.stepstone.de" + link
-
-            jobs.append({
-                "id": make_id(title, company),
-                "title": title,
-                "company": company,
-                "location": location,
-                "snippet": "",
-                "link": link,
-                "source": "Stepstone",
-            })
-    except Exception as e:
-        print(f"[Stepstone] Fehler: {e}")
-    return jobs
-
-
-# ── Scraper: Ausbildung.de ───────────────────────────────────────────────────
-def scrape_ausbildung_de() -> list[dict]:
-    jobs = []
-    url = (
-        "https://www.ausbildung.de/duales-studium/stellen/"
-        "?location=M%C3%BCnchen&radius=20"
-    )
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=15)
-        soup = BeautifulSoup(r.text, "html.parser")
-        cards = soup.select("div.ResultItem")[:15]
-        for card in cards:
-            title_el = card.select_one("h3") or card.select_one("h2")
-            company_el = card.select_one("span.company") or card.select_one("p.company")
-            link_el = card.select_one("a[href]")
-
-            title = title_el.get_text(strip=True) if title_el else "–"
-            company = company_el.get_text(strip=True) if company_el else "–"
-            link = link_el["href"] if link_el else ""
-            if link and not link.startswith("http"):
-                link = "https://www.ausbildung.de" + link
-
-            jobs.append({
-                "id": make_id(title, company),
-                "title": title,
-                "company": company,
-                "location": "München",
-                "snippet": "",
-                "link": link,
-                "source": "Ausbildung.de",
-            })
-    except Exception as e:
-        print(f"[Ausbildung.de] Fehler: {e}")
+        print(f"[Bundesagentur] Fehler: {e}")
     return jobs
 
 
@@ -176,12 +129,12 @@ def scrape_linkedin() -> list[dict]:
     jobs = []
     url = (
         "https://www.linkedin.com/jobs/search/"
-        "?keywords=duales+Studium&location=M%C3%BCnchen&f_TPR=r86400&sortBy=DD"
+        "?keywords=duales+Studium&location=M%C3%BCnchen&f_TPR=r604800&sortBy=DD"
     )
     try:
-        r = requests.get(url, headers=HEADERS, timeout=15)
+        r = requests.get(url, headers=HEADERS, timeout=20)
         soup = BeautifulSoup(r.text, "html.parser")
-        cards = soup.select("div.base-card")[:15]
+        cards = soup.select("div.base-card")[:20]
         for card in cards:
             title_el = card.select_one("h3.base-search-card__title")
             company_el = card.select_one("h4.base-search-card__subtitle")
@@ -207,7 +160,7 @@ def scrape_linkedin() -> list[dict]:
     return jobs
 
 
-# ── Gemini-Analyse ───────────────────────────────────────────────────────────
+# ── Gemini-Analyse (mit Retry bei 429) ───────────────────────────────────────
 def analyze_with_gemini(jobs: list[dict]) -> str:
     if not jobs:
         return "Heute wurden keine neuen Stellen gefunden."
@@ -221,7 +174,7 @@ def analyze_with_gemini(jobs: list[dict]) -> str:
         for i, j in enumerate(jobs)
     )
 
-    prompt = f"""Du bist ein Karriere-Assistent. Analysiere die folgenden neuen dualen Studiengang-Stellen in München vom heutigen Tag.
+    prompt = f"""Du bist ein Karriere-Assistent. Analysiere die folgenden neuen dualen Studiengang-Stellen in München.
 
 STELLEN:
 {jobs_text}
@@ -234,17 +187,36 @@ Erstelle eine strukturierte Zusammenfassung auf Deutsch mit:
 
 Halte es kompakt und lesbar für Telegram (kein HTML, nur plain text mit Emojis)."""
 
-    response = requests.post(
-        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}",
-        headers={"Content-Type": "application/json"},
-        json={
-            "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"maxOutputTokens": 1500},
-        },
-        timeout=60,
+    url = (
+        f"https://generativelanguage.googleapis.com/v1beta/models/"
+        f"gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
     )
-    response.raise_for_status()
-    return response.json()["candidates"][0]["content"]["parts"][0]["text"]
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"maxOutputTokens": 1500},
+    }
+
+    # Retry bei 429: 3 Versuche mit exponentiellem Backoff
+    for attempt in range(3):
+        try:
+            r = requests.post(
+                url, headers={"Content-Type": "application/json"},
+                json=payload, timeout=60,
+            )
+            if r.status_code == 429:
+                wait = 30 * (attempt + 1)  # 30s, 60s, 90s
+                print(f"[Gemini] Rate limit – warte {wait}s (Versuch {attempt+1}/3)...")
+                time.sleep(wait)
+                continue
+            r.raise_for_status()
+            return r.json()["candidates"][0]["content"]["parts"][0]["text"]
+        except requests.exceptions.HTTPError as e:
+            if attempt == 2:
+                raise
+            print(f"[Gemini] Fehler: {e} – Versuch {attempt+1}/3")
+            time.sleep(30)
+
+    return "Fehler bei der Gemini-Analyse nach 3 Versuchen."
 
 
 # ── Telegram-Versand ─────────────────────────────────────────────────────────
@@ -252,7 +224,6 @@ def send_telegram(message: str):
     today = datetime.now().strftime("%d.%m.%Y")
     full_message = f"🎓 Duales Studium München – {today}\n\n{message}"
 
-    # Telegram hat ein 4096-Zeichen-Limit
     chunks = [full_message[i:i+4000] for i in range(0, len(full_message), 4000)]
     for chunk in chunks:
         r = requests.post(
@@ -275,15 +246,14 @@ def main():
 
     seen = load_seen_ids()
 
-    # Alle Portale scrapen
     all_jobs = []
-    for scraper_fn in [scrape_indeed, scrape_stepstone, scrape_ausbildung_de, scrape_linkedin]:
+    for scraper_fn in [scrape_bundesagentur, scrape_linkedin]:
         jobs = scraper_fn()
         print(f"  {scraper_fn.__name__}: {len(jobs)} Stellen gefunden")
         all_jobs.extend(jobs)
-        time.sleep(2)  # höfliche Pause zwischen Requests
+        time.sleep(3)
 
-    # Duplikate entfernen (global + tagesübergreifend)
+    # Deduplizieren
     seen_today = set()
     new_jobs = []
     for job in all_jobs:
@@ -292,15 +262,11 @@ def main():
             seen_today.add(job["id"])
 
     print(f"📋 {len(new_jobs)} neue Stellen (nach Deduplizierung)")
-
-    # IDs speichern
     save_seen_ids(seen, list(seen_today))
 
-    # Gemini-Analyse
     print("🤖 Gemini analysiert...")
     analysis = analyze_with_gemini(new_jobs)
 
-    # Telegram senden
     send_telegram(analysis)
 
 
