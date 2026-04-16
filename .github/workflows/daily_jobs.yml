@@ -1,0 +1,49 @@
+name: Duales Studium München – Tägliche Analyse
+
+on:
+  schedule:
+    # 08:00 Uhr MEZ = 07:00 UTC (Winter) / 06:00 UTC (Sommer)
+    # Wir nehmen 06:00 UTC → passt für MESZ (Sommerzeit)
+    - cron: "0 6 * * 1-5"   # Mo–Fr um 08:00 MESZ
+    - cron: "0 7 * * 6,0"   # Sa+So um 08:00 MEZ (Winterzeit-Fallback)
+  workflow_dispatch:         # Manuell auslösbar (zum Testen)
+
+jobs:
+  scrape-and-analyze:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write        # Zum Speichern von seen_jobs.json
+
+    steps:
+      - name: 📥 Repository auschecken
+        uses: actions/checkout@v4
+
+      - name: 🐍 Python einrichten
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 📦 Abhängigkeiten installieren
+        run: pip install requests beautifulsoup4
+
+      - name: 🔍 Seen-Jobs-Cache laden
+        # seen_jobs.json liegt im Repo und wird committet
+        run: |
+          if [ ! -f seen_jobs.json ]; then
+            echo "{}" > seen_jobs.json
+          fi
+
+      - name: 🤖 Scraper + Claude-Analyse ausführen
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python scraper.py
+
+      - name: 💾 Seen-Jobs-Cache speichern
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add seen_jobs.json
+          git diff --staged --quiet || git commit -m "chore: update seen_jobs cache [skip ci]"
+          git push
