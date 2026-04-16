@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Duales Studium München – täglicher Job-Scraper + Claude-Analyse → Telegram
+Duales Studium München – täglicher Job-Scraper + Gemini-Analyse → Telegram
 """
 
 import os
@@ -12,7 +12,7 @@ from datetime import datetime, date
 from bs4 import BeautifulSoup
 
 # ── Konfiguration ────────────────────────────────────────────────────────────
-ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
+GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
@@ -207,8 +207,8 @@ def scrape_linkedin() -> list[dict]:
     return jobs
 
 
-# ── Claude-Analyse ───────────────────────────────────────────────────────────
-def analyze_with_claude(jobs: list[dict]) -> str:
+# ── Gemini-Analyse ───────────────────────────────────────────────────────────
+def analyze_with_gemini(jobs: list[dict]) -> str:
     if not jobs:
         return "Heute wurden keine neuen Stellen gefunden."
 
@@ -235,21 +235,16 @@ Erstelle eine strukturierte Zusammenfassung auf Deutsch mit:
 Halte es kompakt und lesbar für Telegram (kein HTML, nur plain text mit Emojis)."""
 
     response = requests.post(
-        "https://api.anthropic.com/v1/messages",
-        headers={
-            "x-api-key": ANTHROPIC_API_KEY,
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json",
-        },
+        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}",
+        headers={"Content-Type": "application/json"},
         json={
-            "model": "claude-sonnet-4-6",
-            "max_tokens": 1500,
-            "messages": [{"role": "user", "content": prompt}],
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"maxOutputTokens": 1500},
         },
         timeout=60,
     )
     response.raise_for_status()
-    return response.json()["content"][0]["text"]
+    return response.json()["candidates"][0]["content"]["parts"][0]["text"]
 
 
 # ── Telegram-Versand ─────────────────────────────────────────────────────────
@@ -301,9 +296,9 @@ def main():
     # IDs speichern
     save_seen_ids(seen, list(seen_today))
 
-    # Claude-Analyse
-    print("🤖 Claude analysiert...")
-    analysis = analyze_with_claude(new_jobs)
+    # Gemini-Analyse
+    print("🤖 Gemini analysiert...")
+    analysis = analyze_with_gemini(new_jobs)
 
     # Telegram senden
     send_telegram(analysis)

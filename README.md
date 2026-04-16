@@ -22,7 +22,7 @@ Gehe zu: **Repository → Settings → Secrets and variables → Actions → New
 
 | Secret | Wert | Wo bekommst du ihn? |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | `sk-ant-...` | [console.anthropic.com](https://console.anthropic.com) |
+| `GEMINI_API_KEY` | `AIza...` | [aistudio.google.com/apikey](https://aistudio.google.com/apikey) (kostenlos) |
 | `TELEGRAM_BOT_TOKEN` | `123456:ABC...` | Bereits in deinem maxi-bot vorhanden |
 | `TELEGRAM_CHAT_ID` | `-100123456` oder `123456` | Siehe unten |
 
