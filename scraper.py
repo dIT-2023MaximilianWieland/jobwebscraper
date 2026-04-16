@@ -16,7 +16,6 @@ from datetime import datetime, date
 from bs4 import BeautifulSoup
 
 # ── Konfiguration ────────────────────────────────────────────────────────────
-GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
@@ -145,65 +144,25 @@ def scrape_linkedin() -> list[dict]:
     return jobs
 
 
-# ── Gemini-Analyse ───────────────────────────────────────────────────────────
-def analyze_with_gemini(jobs: list[dict]) -> str:
+# ── Stellenliste formatieren ─────────────────────────────────────────────────
+def format_jobs(jobs: list[dict]) -> str:
     if not jobs:
         return "Heute wurden keine neuen Stellen gefunden."
 
-    jobs_text = "\n\n".join(
-        f"#{i+1} [{j['source']}] {j['title']}\n"
-        f"  Unternehmen: {j['company']}\n"
-        f"  Ort: {j['location']}\n"
-        f"  Beschreibung: {j['snippet'] or '(keine)'}\n"
-        f"  Link: {j['link']}"
-        for i, j in enumerate(jobs)
-    )
+    lines = [f"📋 {len(jobs)} neue Stelle(n) gefunden:\n"]
 
-    prompt = f"""Du bist ein Karriere-Assistent. Analysiere die folgenden neuen dualen Studiengang-Stellen in München.
+    for i, j in enumerate(jobs, 1):
+        lines.append("─" * 30)
+        lines.append(f"🎓 {j['title']}")
+        lines.append(f"🏢 {j['company']}")
+        lines.append(f"📍 {j['location']}  |  📡 {j['source']}")
+        if j["snippet"]:
+            lines.append(f"📝 {j['snippet']}")
+        if j["link"]:
+            lines.append(f"🔗 {j['link']}")
+        lines.append("")
 
-STELLEN:
-{jobs_text}
-
-Erstelle eine strukturierte Zusammenfassung auf Deutsch mit:
-1. Überblick – Wie viele Stellen aus welchen Branchen?
-2. Top-Empfehlungen – Die 3 interessantesten Stellen mit kurzer Begründung und direktem Link
-3. Trends – Welche Unternehmen/Branchen suchen besonders aktiv?
-4. Hinweise – Besonderheiten oder Auffälligkeiten
-
-Halte es kompakt und lesbar für Telegram (kein Markdown, nur plain text mit Emojis)."""
-
-    url = (
-        "https://generativelanguage.googleapis.com/v1beta/models/"
-        f"gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
-    )
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"maxOutputTokens": 1500},
-    }
-
-    # Retry bei 429 mit exponentiellem Backoff
-    for attempt in range(4):
-        try:
-            r = requests.post(
-                url,
-                headers={"Content-Type": "application/json"},
-                json=payload,
-                timeout=60,
-            )
-            if r.status_code == 429:
-                wait = 20 * (2 ** attempt)  # 20s, 40s, 80s, 160s
-                print(f"[Gemini] Rate limit – warte {wait}s (Versuch {attempt+1}/4)...")
-                time.sleep(wait)
-                continue
-            r.raise_for_status()
-            return r.json()["candidates"][0]["content"]["parts"][0]["text"]
-        except requests.exceptions.HTTPError as e:
-            if attempt == 3:
-                raise
-            print(f"[Gemini] HTTP-Fehler: {e} – Versuch {attempt+1}/4")
-            time.sleep(20)
-
-    return "Fehler bei der Gemini-Analyse nach 4 Versuchen."
+    return "\n".join(lines)
 
 
 # ── Telegram-Versand ─────────────────────────────────────────────────────────
@@ -250,8 +209,8 @@ def main():
     print(f"📋 {len(new_jobs)} neue Stellen (nach Deduplizierung)")
     save_seen_ids(seen, list(seen_today))
 
-    print("🤖 Gemini analysiert...")
-    analysis = analyze_with_gemini(new_jobs)
+    print("📋 Formatiere Stellenliste...")
+    analysis = format_jobs(new_jobs)
 
     send_telegram(analysis)
 
